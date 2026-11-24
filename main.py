@@ -2,7 +2,7 @@
 
 Phase 1 & Phase 2: Camera Vision + Text Chat đa lượt thông minh.
 Phase 3: Tự động đàm thoại 2 chiều với Loa và Mic của Camera Tiandy.
-Bonus: Điều khiển xoay camera PTZ & Điều chỉnh âm lượng & Vũ điệu nhảy múa.
+Bonus: Điều khiển xoay camera PTZ & Điều chỉnh âm lượng & Chụp và lưu ảnh vào folder.
 """
 
 import re
@@ -16,10 +16,17 @@ from audio.camera_speaker import play_on_camera_speaker
 from audio.pc_listener import listen_from_pc_mic
 from audio.text_to_speech import speak_text
 from camera.ptz import ptz_controller
-from camera.snapshot import CameraConnectionError, capture_latest_frame
+from camera.snapshot import CameraConnectionError, capture_latest_frame, save_snapshot_to_disk
 from camera.volume import volume_controller
 from config.settings import settings
 from conversation.memory import ConversationMemory
+
+# Từ khóa nhận diện yêu cầu chụp ảnh và lưu lại
+CAPTURE_INTENT_KEYWORDS = [
+    "chụp ảnh", "chụp hình", "chụp lại", "chụp tấm", "chụp bức",
+    "lưu ảnh", "chụp một kiểu", "chụp đi", "chụp giúp", "chụp cho anh",
+    "chụp cho em", "chụp cho tôi", "take photo", "capture", "chụp"
+]
 
 # Từ khóa nhận diện lệnh xoay camera
 PTZ_KEYWORDS = {
@@ -82,6 +89,12 @@ FOLLOW_UP_KEYWORDS = [
 ]
 
 
+def is_explicit_capture_request(prompt: str) -> bool:
+    """Kiểm tra xem câu nói có phải yêu cầu chụp ảnh và lưu lại không."""
+    text = prompt.lower().strip()
+    return any(kw in text for kw in CAPTURE_INTENT_KEYWORDS)
+
+
 def detect_dance_intent(prompt: str) -> bool:
     """Kiểm tra xem câu nói có yêu cầu nhảy múa không."""
     text = prompt.lower().strip()
@@ -94,11 +107,9 @@ def perform_dance(enable_voice: bool = True) -> str:
     print("\n💃 [Vũ đạo Bủn] Bắt đầu màn nhảy múa lắc lư camera...")
     print(f"💬 Bủn: {dance_msg}\n")
 
-    # Chạy động cơ xoay nhảy múa trong thread riêng biệt
     dance_thread = threading.Thread(target=ptz_controller.dance)
     dance_thread.start()
 
-    # Đồng thời phát giọng nói vui tươi qua Loa của Camera Tiandy
     if enable_voice:
         if not play_on_camera_speaker(dance_msg):
             speak_text(dance_msg)
@@ -109,7 +120,7 @@ def perform_dance(enable_voice: bool = True) -> str:
 
 
 def detect_ptz_intent(prompt: str) -> Optional[str]:
-    """Nhận diện cực kỳ linh hoạt ý định điều khiển xoay camera trong câu nói tự nhiên."""
+    """Nhận diện ý định điều khiển xoay camera trong câu nói tự nhiên."""
     text = prompt.lower().strip()
 
     action_words = [
@@ -196,7 +207,7 @@ def process_query_and_reply(
     memory: ConversationMemory,
     enable_voice: bool = True,
 ) -> str:
-    """Xử lý câu hỏi, nhảy múa/chỉnh âm lượng/xoay camera nếu yêu cầu, hỏi Gemini và phát loa."""
+    """Xử lý câu hỏi, chụp và lưu ảnh vào folder nếu yêu cầu, xoay camera, hỏi Gemini và phát loa."""
     # 1. Kiểm tra yêu cầu nhảy múa
     if detect_dance_intent(prompt):
         return perform_dance(enable_voice=enable_voice)
@@ -231,26 +242,39 @@ def process_query_and_reply(
         else:
             print("⚠️ Không thể xoay camera.")
 
-    # 4. Quyết định chụp ảnh
+    # 4. Kiểm tra xem có phải yêu cầu chụp và lưu ảnh không
+    want_save_photo = is_explicit_capture_request(prompt)
+
     need_new_snapshot, reuse_previous = determine_vision_mode(prompt, memory)
-    if ptz_direction:
+    if ptz_direction or want_save_photo:
         need_new_snapshot = True
         reuse_previous = False
 
     image_bytes = None
+    saved_file_path = None
+
     if need_new_snapshot:
-        print("📸 [Camera] Đang chụp frame mới...")
+        print("📸 [Camera] Đang chụp frame mới từ camera...")
         try:
             image_bytes = capture_latest_frame()
+            # Nếu người dùng yêu cầu chụp ảnh hoặc lưu ảnh, tự động lưu file vào folder data/captures
+            if want_save_photo:
+                saved_file_path = save_snapshot_to_disk(image_bytes)
+                print(f"💾 [Lưu ảnh] Đã lưu file ảnh vào: {saved_file_path}")
         except CameraConnectionError as cam_err:
             print(f"⚠️  [Camera] Không chụp được ảnh ({cam_err}). Chuyển sang trả lời thuần text.")
             image_bytes = None
     elif reuse_previous:
         print("🔄 [Ngữ cảnh] Dùng lại hình ảnh gần nhất để trả lời tiếp nối...")
 
+    # Nếu người dùng yêu cầu chụp ảnh, bổ sung chỉ dẫn ngữ cảnh cho Gemini
+    actual_prompt = prompt
+    if want_save_photo and saved_file_path:
+        actual_prompt = f"{prompt} (Hệ thống đã chụp và lưu bức ảnh thành công vào {saved_file_path}. Hãy xác nhận em đã chụp và lưu ảnh vào máy cho anh, rồi mô tả ngắn gọn 1 câu những gì em thấy nhé.)"
+
     print("⏳ Bủn đang suy nghĩ...")
     reply = assistant.ask(
-        prompt=prompt,
+        prompt=actual_prompt,
         image_bytes=image_bytes,
         memory=memory,
         reuse_last_image=reuse_previous,
@@ -278,7 +302,7 @@ def start_chat_mode(
     print("💬  CHẾ ĐỘ CHAT VĂN BẢN VỚI TRỢ LÝ BỦN (TEXT CHAT)")
     print("=" * 64)
     print(" • Hãy nhập câu hỏi bằng bàn phím để trò chuyện.")
-    print(" • Thử: 'nhảy múa đi', 'nhìn sang trái', 'nói to lên', 'trên bàn có gì'...")
+    print(" • Thử: 'chụp ảnh', 'chụp lại một tấm', 'nhìn sang trái', 'nói to lên'...")
     print(" • Gõ /back để quay lại menu chính.\n")
 
     while True:
@@ -314,7 +338,7 @@ def start_voice_mode(assistant: GeminiVisionAssistant, memory: ConversationMemor
     print("🎙️  CHẾ ĐỘ TỰ ĐỘNG NGHE LIÊN TỤC TỪ MIC CAMERA TIANDY")
     print("=" * 64)
     print(" • Bủn đang lắng nghe âm thanh từ camera phòng bạn.")
-    print(" • Hãy đứng gần camera và nói rõ ràng (ví dụ: 'Bủn ơi nhảy đi', 'nhìn sang trái').")
+    print(" • Hãy đứng gần camera và nói rõ ràng (ví dụ: 'chụp ảnh', 'nhìn sang trái').")
     print(" • Nhấn Ctrl + C để dừng chế độ này và quay lại menu.\n")
 
     listener = CameraAudioListener()
@@ -346,8 +370,9 @@ def print_banner() -> None:
     print(f" • Camera RTSP  : {settings.CAMERA_RTSP_URL}")
     print(f" • Âm lượng Loa : {cur_vol}%")
     print(" • Tính năng nổi bật:")
-    print("     /dance     : Bủn biểu diễn màn nhảy múa lắc lư camera cực vui nhộn 💃")
+    print("     /snap      : Chụp và lưu ảnh vào folder data/captures/ 💾")
     print("     /chat      : Vào chế độ Chat văn bản chuyên dụng")
+    print("     /dance     : Bủn biểu diễn màn nhảy múa lắc lư camera 💃")
     print("     /vol <1-100>: Chỉnh âm lượng loa camera (vd: /vol 80, /vol +, /vol -)")
     print("     /mic       : Nói 1 câu qua Mic Laptop/PC (chất lượng HD)")
     print("     /voice     : Chế độ tự động nghe liên tục từ Mic Camera")
@@ -381,6 +406,28 @@ def handle_volume_command(cmd_text: str) -> None:
     print(f"🔊 [Âm lượng] Đã chỉnh âm lượng loa camera thành: {new_val}%\n")
 
 
+def handle_snap_and_save(assistant: GeminiVisionAssistant, memory: ConversationMemory, voice_enabled: bool) -> None:
+    """Chụp frame camera, lưu vào thư mục data/captures và nhờ Bủn mô tả."""
+    print("\n📸 [Camera] Đang chụp frame mới nhất từ camera...")
+    try:
+        image_bytes = capture_latest_frame()
+        file_path = save_snapshot_to_disk(image_bytes)
+        print(f"💾 [Lưu ảnh] Đã lưu thành công bức ảnh vào: {file_path}")
+        print("🔍 [Bủn] Đang quan sát khung cảnh...")
+        prompt = "Em vừa chụp một bức ảnh và lưu vào máy cho anh. Hãy xác nhận đã chụp và lưu ảnh thành công, rồi mô tả ngắn gọn 1-2 câu những gì em nhìn thấy nhé."
+        reply = assistant.ask(
+            prompt=prompt,
+            image_bytes=image_bytes,
+            memory=memory,
+        )
+        print(f"\n💬 Bủn: {reply}\n")
+        if voice_enabled:
+            if not play_on_camera_speaker(reply):
+                speak_text(reply)
+    except Exception as exc:
+        print(f"❌ [Lỗi] {exc}\n")
+
+
 def main() -> None:
     """Hàm khởi chạy ứng dụng chính."""
     volume_controller.set_volume(90)
@@ -404,7 +451,7 @@ def main() -> None:
 
     while True:
         try:
-            user_input = input("👉 Lệnh (/dance, /chat, /vol, /mic, /voice, exit): ").strip()
+            user_input = input("👉 Lệnh (/chat, /snap, /dance, /vol, /mic, exit): ").strip()
         except (KeyboardInterrupt, EOFError):
             print("\n👋 Bủn chào bạn nhé! Hẹn gặp lại.")
             break
@@ -416,6 +463,11 @@ def main() -> None:
         if cmd in ["exit", "quit", "q"]:
             print("👋 Bủn chào bạn nhé!")
             break
+
+        # Lệnh chụp và lưu ảnh
+        if cmd == "/snap":
+            handle_snap_and_save(assistant, memory, voice_enabled)
+            continue
 
         # Lệnh nhảy múa
         if cmd in ["/dance", "/nhay", "/mua", "/nhay-mua"]:
@@ -484,24 +536,7 @@ def main() -> None:
             print_banner()
             continue
 
-        if cmd == "/snap":
-            print("\n📸 [Camera] Đang chụp frame mới nhất từ camera...")
-            try:
-                image_bytes = capture_latest_frame()
-                print("🔍 [Bủn] Đang quan sát khung cảnh...")
-                reply = assistant.ask(
-                    prompt="Hãy nhìn quanh khung cảnh camera đang quay và tóm tắt ngắn gọn 1-2 câu những gì bạn thấy nhé.",
-                    image_bytes=image_bytes,
-                    memory=memory,
-                )
-                print(f"\n💬 Bủn: {reply}\n")
-                if voice_enabled:
-                    if not play_on_camera_speaker(reply):
-                        speak_text(reply)
-            except Exception as exc:
-                print(f"❌ [Lỗi] {exc}\n")
-            continue
-
+        # Xử lý câu hỏi/câu nói trực tiếp
         try:
             process_query_and_reply(user_input, assistant, memory, enable_voice=voice_enabled)
         except GeminiServiceError as ai_err:

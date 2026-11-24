@@ -39,7 +39,12 @@ class CameraVolumeController:
             self._connect()
             configs = self._media.GetAudioOutputConfigurations()
             if configs:
-                self._current_volume = int(configs[0].OutputLevel)
+                lvl = int(configs[0].OutputLevel)
+                # Nếu camera vừa khởi động lại bị reset về 1%, tự động nâng lên 90%
+                if lvl <= 5:
+                    self.set_volume(90)
+                else:
+                    self._current_volume = lvl
         except Exception as exc:
             logger.debug("Không thể đọc volume từ ONVIF: %s", exc)
         return self._current_volume
